@@ -270,7 +270,7 @@ func TestNetwork(t *testing.T) {
 			break
 		}
 	}
-	if n != 185 {
+	if n != 186 {
 		t.Fatalf("triage has %d actors", n)
 	}
 }

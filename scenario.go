@@ -155,6 +155,7 @@ func Demo(w *World) {
 	for i := 0; i < 30; i++ {
 		running("triage", "triage-"+hex(), "agent-devbox-v12", "gvisor-pool-a", time.Duration(r.IntN(1800))*time.Second)
 	}
+	suspended("triage", "triage-91c0", "agent-devbox-v12", 2*time.Minute)
 	suspended("triage", "triage-2a90", "agent-devbox-v12", 41*time.Minute)
 	suspended("triage", "triage-5e18", "agent-devbox-v12", 3*time.Hour)
 	for i := 0; i < 148; i++ {
