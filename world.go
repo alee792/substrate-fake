@@ -79,6 +79,8 @@ type Call struct {
 	Target string // "atespace/name", or "" when the call has none
 	Time   time.Time
 	Code   codes.Code
+	// Principal made the call, when the server authenticates calls.
+	Principal string
 }
 
 func (c Call) String() string {
@@ -134,6 +136,7 @@ type World struct {
 	calls     []Call
 	faults    map[string][]*Fault
 	onResume  []func(*ateapi.ObjectRef)
+	access    *access
 
 	// GoldenDelay is how long a new template's golden snapshot takes. Zero
 	// makes it ready at once.
@@ -156,7 +159,7 @@ func NewWorld(clock Clock) *World {
 		atespaces: map[string]*ateapi.Atespace{}, templates: map[string]*ateapi.ActorTemplate{},
 		actors: map[string]*ateapi.Actor{}, policies: map[string]*ateapi.EgressPolicy{},
 		workers: map[string]*ateapi.Worker{}, logs: map[string][]LogLine{}, bound: map[string]time.Time{},
-		profiles: map[string]Profile{}, goldenErr: map[string]string{}, faults: map[string][]*Fault{},
+		profiles: map[string]Profile{}, goldenErr: map[string]string{}, faults: map[string][]*Fault{}, access: newAccess(),
 		DefaultProfile: Profile{
 			ResumesPerSecond: func(time.Time) float64 { return 0.02 },
 			ResumeP95:        func(time.Time) time.Duration { return 400 * time.Millisecond },

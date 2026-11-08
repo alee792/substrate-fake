@@ -48,7 +48,18 @@ func (k *kubeAPI) handler() http.Handler {
 	mux.HandleFunc("/", func(rw http.ResponseWriter, r *http.Request) {
 		writeStatus(rw, http.StatusNotFound, "NotFound", fmt.Sprintf("the server could not find the requested resource (%s %s); substrate-fake serves only what Substrate clients read", r.Method, r.URL.Path))
 	})
-	return k.auth(mux)
+	// OIDC discovery for the ServiceAccount issuer, open to anyone as
+	// clusters commonly configure it, so verifiers can find the keys.
+	open := http.NewServeMux()
+	open.HandleFunc("GET /.well-known/openid-configuration", func(rw http.ResponseWriter, _ *http.Request) {
+		rw.Header().Set("Content-Type", "application/json")
+		_, _ = rw.Write(k.w.discovery())
+	})
+	open.HandleFunc("GET /openid/v1/jwks", func(rw http.ResponseWriter, _ *http.Request) {
+		writeJSON(rw, http.StatusOK, k.w.JWKS())
+	})
+	open.Handle("/", k.auth(mux))
+	return open
 }
 
 func (k *kubeAPI) auth(next http.Handler) http.Handler {
@@ -120,22 +131,32 @@ func orEmpty(v []any) []any {
 	return v
 }
 
-// tokenRequest mints the fake's one bearer token for the ate-client
-// ServiceAccount, the way kubectl-ate gets an ateapi token.
+// tokenRequest mints a ServiceAccount token, the way kubectl-ate gets an
+// ateapi token for ate-client, or a person mints one for their own
+// ServiceAccount with `kubectl create token`. The fake keeps no
+// ServiceAccounts, so any name works.
 func (k *kubeAPI) tokenRequest(rw http.ResponseWriter, r *http.Request) {
 	ns, sa := r.PathValue("ns"), r.PathValue("sa")
-	if ns != SystemNamespace || sa != ClientServiceAccount {
-		writeStatus(rw, http.StatusNotFound, "NotFound", fmt.Sprintf(`serviceaccounts "%s" not found`, sa))
-		return
-	}
 	var req struct {
-		Spec map[string]any `json:"spec"`
+		Spec struct {
+			Audiences         []string `json:"audiences"`
+			ExpirationSeconds int64    `json:"expirationSeconds"`
+		} `json:"spec"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
+	ttl := k.tokenTTL
+	if req.Spec.ExpirationSeconds > 0 {
+		ttl = time.Duration(req.Spec.ExpirationSeconds) * time.Second
+	}
+	opts := TokenOptions{TTL: ttl}
+	if len(req.Spec.Audiences) > 0 {
+		opts.Audience = req.Spec.Audiences[0]
+	}
+	tok := k.w.IssueToken("system:serviceaccount:"+ns+":"+sa, opts)
 	writeJSON(rw, http.StatusCreated, map[string]any{
 		"kind": "TokenRequest", "apiVersion": "authentication.k8s.io/v1",
 		"metadata": map[string]any{"name": sa, "namespace": ns}, "spec": req.Spec,
-		"status": map[string]any{"token": k.token, "expirationTimestamp": k.w.Now().Add(k.tokenTTL).UTC().Format(time.RFC3339)},
+		"status": map[string]any{"token": tok, "expirationTimestamp": k.w.Now().Add(ttl).UTC().Format(time.RFC3339)},
 	})
 }
 
