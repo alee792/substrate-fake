@@ -503,7 +503,6 @@ func (s *controlServer) DeleteActor(_ context.Context, in *ateapi.DeleteActorReq
 	k := refKey(in.GetActor())
 	delete(w.actors, k)
 	delete(w.policies, k)
-	delete(w.logs, k)
 	a.Status.State = ateapi.ActorState_ACTOR_STATE_DELETING
 	a.Metadata.DeleteTime = ts(w.clock.Now())
 	return a, nil

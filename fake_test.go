@@ -230,16 +230,27 @@ func TestNetwork(t *testing.T) {
 	if len(pools) != 2 {
 		t.Fatalf("%d WorkerPools", len(pools))
 	}
-	logReq, _ := http.NewRequest("GET", c.KubeURL+"/api/v1/namespaces/ate-workers/pods/gvisor-pool-a-1/log?tailLines=2&timestamps=true", nil)
-	logReq.Header.Set("Authorization", "Bearer "+c.Token)
-	resp, err := hc.Do(logReq)
-	if err != nil {
-		t.Fatal(err)
+	klog := func(query string) string {
+		req, _ := http.NewRequest("GET", c.KubeURL+"/api/v1/namespaces/ate-workers/pods/gvisor-pool-a-1/log?"+query, nil)
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		resp, err := hc.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
 	}
-	logs, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if !strings.Contains(string(logs), "waiting for input") || strings.Count(string(logs), "\n") != 2 {
-		t.Fatalf("pod log: %q", logs)
+	// The pod log keeps the previous actor's lines; sinceTime drops them.
+	if full := klog("timestamps=true"); !strings.Contains(full, "212 alerts") || !strings.Contains(full, "waiting for input") {
+		t.Fatalf("full pod log: %q", full)
+	}
+	since := c.World.Actor("triage", "triage-7f3a").Metadata.UpdateTime.AsTime().Format(time.RFC3339)
+	if logs := klog("timestamps=true&sinceTime=" + url.QueryEscape(since)); strings.Contains(logs, "212 alerts") || !strings.Contains(logs, "waiting for input") {
+		t.Fatalf("pod log since %s: %q", since, logs)
+	}
+	if logs := klog("tailLines=2"); strings.Count(logs, "\n") != 2 {
+		t.Fatalf("tailLines=2: %q", logs)
 	}
 
 	roots := x509.NewCertPool()

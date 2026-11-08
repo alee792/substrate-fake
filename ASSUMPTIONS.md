@@ -15,4 +15,4 @@ Where Substrate v1.0.0's API documentation doesn't say what happens, the fake pi
 11. **Only ready workers exist in ateapi.** A pool with fewer ready replicas than desired has fewer Workers.
 12. **Metric names and labels**: `ate.actor.lifecycle.operation.duration` (seconds, with `ate.actor.operation.name`, `ate.template.name`, `ate.template.atespace`, `ate.workerpool.name`, `error.type`) and `ate.actor.crashes`. Underscore names add `_seconds` and `_total`.
 13. **Worker names are `<pool>-<n>`**, and the worker pod has the same name.
-14. **Pod logs are per actor.** A worker pod's log shows whatever actor is assigned to it now.
+14. **A worker pod's log holds every actor that ran there**, one after another, as a container log would. Readers that want one actor's lines pass `sinceTime`, honoured to the second like the real API server.

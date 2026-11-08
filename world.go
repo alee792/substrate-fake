@@ -124,7 +124,7 @@ type World struct {
 	policies  map[string]*ateapi.EgressPolicy // by actor
 	workers   map[string]*ateapi.Worker
 	pools     []*Pool
-	logs      map[string][]LogLine // by actor
+	logs      map[string][]LogLine // by worker pod, "namespace/pod"
 	crashes   []CrashEvent
 	profiles  map[string]Profile // by template
 	goldenErr map[string]string  // by template, applied at creation
@@ -323,13 +323,25 @@ func (w *World) SetProfile(atespace, template string, p Profile) {
 	w.mu.Unlock()
 }
 
-// AppendLog adds lines to an actor's log. Its worker pod serves them while
-// the actor runs.
-func (w *World) AppendLog(atespace, actor string, lines ...LogLine) {
+// AppendLog writes lines to the log of the worker pod an actor is on, as
+// its output would be. The lines stay in that pod's log after the actor
+// leaves, as in a real worker, so the next actor's readers see them unless
+// they read from when it arrived.
+func (w *World) AppendLog(atespace, actor string, lines ...LogLine) error {
 	w.mu.Lock()
-	k := key(atespace, actor)
+	defer w.mu.Unlock()
+	a := w.actors[key(atespace, actor)]
+	if a == nil {
+		return fmt.Errorf("actor %s/%s not found", atespace, actor)
+	}
+	wa := a.Status.GetWorkerAssignment()
+	if wa == nil {
+		return fmt.Errorf("actor %s/%s has no worker to log on", atespace, actor)
+	}
+	k := key(wa.WorkerNamespace, wa.WorkerPod)
 	w.logs[k] = append(w.logs[k], lines...)
-	w.mu.Unlock()
+	sort.SliceStable(w.logs[k], func(i, j int) bool { return w.logs[k][i].Time.Before(w.logs[k][j].Time) })
+	return nil
 }
 
 // ---------- driving ----------
@@ -594,26 +606,14 @@ func (w *World) selectorFor(a *ateapi.Actor) map[string]string {
 	return nil
 }
 
-// podLogs returns the log of whatever actor runs in a worker pod.
+// podLogs returns a worker pod's whole log: every actor that has run there.
 func (w *World) podLogs(namespace, pod string) ([]LogLine, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.tick()
-	found := false
 	for _, wk := range w.workers {
 		if wk.WorkerNamespace == namespace && wk.WorkerPod == pod {
-			found = true
+			return slices.Clone(w.logs[key(namespace, pod)]), true
 		}
 	}
-	if !found {
-		return nil, false
-	}
-	var out []LogLine
-	for k, a := range w.actors {
-		if wa := a.Status.GetWorkerAssignment(); wa != nil && wa.WorkerNamespace == namespace && wa.WorkerPod == pod {
-			out = append(out, w.logs[k]...)
-		}
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
-	return out, true
+	return nil, false
 }
