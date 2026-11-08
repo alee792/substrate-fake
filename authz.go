@@ -240,10 +240,26 @@ func checks(req any) ([]check, bool) {
 	case *ateapi.ListActorTemplatesRequest:
 		return []check{list("can_list_actor_templates", r.GetAtespace())}, true
 	case *ateapi.CreateActorRequest:
-		return []check{
+		cs := []check{
 			on("can_create_actor", r.GetActor().GetMetadata().GetAtespace(), RoleEditor),
 			on("can_use_template", r.GetActor().GetActorTemplate().GetAtespace(), RoleViewer),
-		}, true
+		}
+		if t := r.GetActor().GetSourceTag(); t != nil {
+			// Editor of the tag's atespace, as authorization.md says
+			// (upstream #3293 tracks that viewers can't use published tags).
+			cs = append(cs, on("can_use_tag", t.GetAtespace(), RoleEditor))
+		}
+		return cs, true
+	case *ateapi.CreateTagRequest:
+		return []check{on("can_create_tag", r.GetTag().GetSourceActor().GetAtespace(), RoleEditor)}, true
+	case *ateapi.GetTagRequest:
+		return []check{on("can_get", r.GetTag().GetAtespace(), RoleViewer)}, true
+	case *ateapi.ListTagsRequest:
+		return []check{list("can_list_tags", r.GetAtespace())}, true
+	case *ateapi.UpdateTagRequest:
+		return []check{on("can_update", r.GetTag().GetMetadata().GetAtespace(), RoleEditor)}, true
+	case *ateapi.DeleteTagRequest:
+		return []check{on("can_delete", r.GetTag().GetAtespace(), RoleEditor)}, true
 	case *ateapi.GetActorRequest:
 		return []check{on("can_get", r.GetActor().GetAtespace(), RoleViewer)}, true
 	case *ateapi.DeleteActorRequest:

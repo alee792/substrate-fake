@@ -468,3 +468,78 @@ func TestAssignmentMarksArrival(t *testing.T) {
 		t.Fatalf("assignment outlived suspend: %v", l)
 	}
 }
+
+// Tags: snapshot a suspended actor, seed new actors from it, refuse a tag
+// from another template, and keep the atespace until the tag is gone.
+func TestTags(t *testing.T) {
+	ctx := context.Background()
+	c := start(t, Options{NoServers: true})
+	api := c.Client()
+	if _, err := api.CreateAtespace(ctx, &ateapi.CreateAtespaceRequest{Atespace: &ateapi.Atespace{Metadata: &ateapi.ResourceMetadata{Name: "tg"}}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"t1", "t2"} {
+		tm := TemplateSpec{Atespace: "tg", Name: n, Image: "img:1", CPUMillis: 1000, MemoryBytes: gib}.Proto()
+		tm.Status = nil
+		if _, err := api.CreateActorTemplate(ctx, &ateapi.CreateActorTemplateRequest{ActorTemplate: tm}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk := func(name, tmpl string, tag *ateapi.ObjectRef) (*ateapi.Actor, error) {
+		return api.CreateActor(ctx, &ateapi.CreateActorRequest{Actor: &ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: "tg", Name: name}, ActorTemplate: ref("tg", tmpl), SourceTag: tag}})
+	}
+	if _, err := mk("builder", "t1", nil); err != nil {
+		t.Fatal(err)
+	}
+	newTag := func(name string) (*ateapi.Tag, error) {
+		return api.CreateTag(ctx, &ateapi.CreateTagRequest{Tag: &ateapi.Tag{Metadata: &ateapi.ResourceMetadata{Atespace: "tg", Name: name}, Scope: ateapi.TagScope_TAG_SCOPE_ATESPACE, SourceActor: ref("tg", "builder")}})
+	}
+	if _, err := api.ResumeActor(ctx, &ateapi.ResumeActorRequest{Actor: ref("tg", "builder")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newTag("env"); code(err) != codes.FailedPrecondition {
+		t.Fatalf("tag of a running actor: %v", err)
+	}
+	if _, err := api.SuspendActor(ctx, &ateapi.SuspendActorRequest{Actor: ref("tg", "builder")}); err != nil {
+		t.Fatal(err)
+	}
+	tg, err := newTag("env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tg.GetStatus().GetSnapshot().GetDurableSnapshot().GetState() != ateapi.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED || tg.GetStatus().GetSnapshot().GetOwner() != ateapi.SnapshotOwner_SNAPSHOT_OWNER_TAG {
+		t.Fatalf("tag status: %v", tg.GetStatus())
+	}
+	if _, err := newTag("env"); code(err) != codes.AlreadyExists {
+		t.Fatalf("second tag of the same name: %v", err)
+	}
+	// The tag outlives its source actor.
+	if _, err := api.DeleteActor(ctx, &ateapi.DeleteActorRequest{Actor: ref("tg", "builder")}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := mk("s1", "t1", ref("tg", "env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.GetSourceTag().GetName() != "env" || len(a.Status.Snapshots) != 1 || a.Status.Snapshots[0].Uuid != tg.Status.Snapshot.Uuid {
+		t.Fatalf("actor from tag: %v", a)
+	}
+	if _, err := mk("s2", "t2", ref("tg", "env")); code(err) != codes.FailedPrecondition {
+		t.Fatalf("tag under another template: %v", err)
+	}
+	if _, err := mk("s3", "t1", ref("tg", "nope")); code(err) != codes.NotFound {
+		t.Fatalf("missing tag: %v", err)
+	}
+	if _, err := api.DeleteActor(ctx, &ateapi.DeleteActorRequest{Actor: ref("tg", "s1")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.DeleteAtespace(ctx, &ateapi.DeleteAtespaceRequest{Atespace: ref("", "tg")}); code(err) != codes.FailedPrecondition {
+		t.Fatalf("delete atespace with a tag: %v", err)
+	}
+	if _, err := api.DeleteTag(ctx, &ateapi.DeleteTagRequest{Tag: ref("tg", "env")}); err != nil {
+		t.Fatal(err)
+	}
+	if c.World.Tag("tg", "env") != nil {
+		t.Fatal("tag still there")
+	}
+}

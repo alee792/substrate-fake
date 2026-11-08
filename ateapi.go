@@ -194,6 +194,11 @@ func (s *controlServer) DeleteAtespace(_ context.Context, in *ateapi.DeleteAtesp
 			return nil, status.Errorf(codes.FailedPrecondition, "atespace %q still has actors", name)
 		}
 	}
+	for k := range w.tags {
+		if strings.HasPrefix(k, name+"/") {
+			return nil, status.Errorf(codes.FailedPrecondition, "atespace %q still has tags", name)
+		}
+	}
 	delete(w.atespaces, name)
 	return a, nil
 }
@@ -308,12 +313,35 @@ func (s *controlServer) CreateActor(_ context.Context, in *ateapi.CreateActorReq
 	if msg := t.GetStatus().GetGoldenSnapshotStatus().GetErrorMessage(); msg != "" {
 		return nil, status.Errorf(codes.FailedPrecondition, "actor template %q has no golden snapshot: %s", tk, msg)
 	}
+	var seed *ateapi.Snapshot
+	if st := a.GetSourceTag(); st != nil {
+		if st.GetAtespace() == "" || st.GetName() == "" {
+			return nil, status.Error(codes.InvalidArgument, "source_tag needs an atespace and a name")
+		}
+		tg := w.tags[refKey(st)]
+		if tg == nil {
+			return nil, notFound("tag", refKey(st))
+		}
+		if tg.Scope != ateapi.TagScope_TAG_SCOPE_PUBLISHED && st.GetAtespace() != md.Atespace {
+			return nil, status.Errorf(codes.FailedPrecondition, "tag %q is not published to atespace %q", refKey(st), md.Atespace)
+		}
+		if tg.GetStatus().GetSnapshot().GetDurableSnapshot().GetState() != ateapi.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED {
+			return nil, status.Errorf(codes.FailedPrecondition, "tag %q is not complete", refKey(st))
+		}
+		if tg.GetStatus().GetActorTemplateUid() != t.GetMetadata().GetUid() {
+			return nil, status.Errorf(codes.FailedPrecondition, "tag %q was taken under another actor template", refKey(st))
+		}
+		seed = clone(tg.Status.Snapshot)
+	}
 	now := w.clock.Now()
 	md.Uid, md.Version, md.CreateTime, md.UpdateTime = "", 0, nil, nil
 	a.Metadata = w.meta(md, now)
 	a.ActorTemplate.Atespace = md.Atespace
 	a.Status = &ateapi.ActorStatus{State: ateapi.ActorState_ACTOR_STATE_SUSPENDED}
-	if tag := t.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag(); tag != nil {
+	if seed != nil {
+		seed.Generation, seed.Locality = 0, ""
+		a.Status.Snapshots = []*ateapi.Snapshot{seed}
+	} else if tag := t.GetStatus().GetGoldenSnapshotStatus().GetGoldenTag(); tag != nil {
 		a.Status.Snapshots = []*ateapi.Snapshot{{
 			Uuid: w.uid(), Generation: 0, Fidelity: t.GetSnapshotConfig().GetPreferredFidelity(), ActorTemplateUid: t.Metadata.Uid,
 			DurableSnapshot: &ateapi.SnapshotStorage{State: ateapi.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED},
@@ -511,6 +539,136 @@ func (s *controlServer) DeleteActor(_ context.Context, in *ateapi.DeleteActorReq
 	a.Status.State = ateapi.ActorState_ACTOR_STATE_DELETING
 	a.Metadata.DeleteTime = ts(w.clock.Now())
 	return a, nil
+}
+
+// ---------- tags ----------
+
+// CreateTag copies the durable snapshot a SUSPENDED actor holds into a new
+// tag, COMPLETED at once (the real copy takes as long as an upload).
+func (s *controlServer) CreateTag(_ context.Context, in *ateapi.CreateTagRequest) (*ateapi.Tag, error) {
+	w := s.w
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.tick()
+	tg := clone(in.GetTag())
+	md := tg.GetMetadata()
+	src := tg.GetSourceActor()
+	if md.GetAtespace() == "" || md.GetName() == "" || src.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "tag needs an atespace, a name and a source_actor")
+	}
+	if src.GetAtespace() != md.GetAtespace() {
+		return nil, status.Error(codes.InvalidArgument, "tag atespace must match source_actor's")
+	}
+	switch tg.GetScope() {
+	case ateapi.TagScope_TAG_SCOPE_ATESPACE, ateapi.TagScope_TAG_SCOPE_PUBLISHED:
+	default:
+		return nil, status.Error(codes.InvalidArgument, "tag scope is required")
+	}
+	k := key(md.Atespace, md.Name)
+	if _, ok := w.tags[k]; ok {
+		return nil, status.Errorf(codes.AlreadyExists, "tag %q already exists", k)
+	}
+	a, err := s.actor(src)
+	if err != nil {
+		return nil, err
+	}
+	if a.Status.State != ateapi.ActorState_ACTOR_STATE_SUSPENDED {
+		return nil, status.Errorf(codes.FailedPrecondition, "actor %s is %s; only a SUSPENDED actor can be tagged", refKey(src), stateName(a.Status.State))
+	}
+	var latest *ateapi.Snapshot
+	for _, sn := range a.Status.Snapshots {
+		if latest == nil || sn.Generation > latest.Generation {
+			latest = sn
+		}
+	}
+	if latest == nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "actor %s holds no snapshot", refKey(src))
+	}
+	t := w.templates[key(a.Metadata.Atespace, a.ActorTemplate.GetName())]
+	if t == nil {
+		return nil, notFound("actor template", key(a.Metadata.Atespace, a.ActorTemplate.GetName()))
+	}
+	snap := clone(latest)
+	snap.Uuid, snap.Owner, snap.Locality = w.uid(), ateapi.SnapshotOwner_SNAPSHOT_OWNER_TAG, ""
+	snap.DurableSnapshot = &ateapi.SnapshotStorage{State: ateapi.SnapshotStorageState_SNAPSHOT_STORAGE_STATE_COMPLETED}
+	md.Uid, md.Version, md.CreateTime, md.UpdateTime = "", 0, nil, nil
+	tg.Metadata = w.meta(md, w.clock.Now())
+	tg.Status = &ateapi.TagStatus{Snapshot: snap, ActorTemplateUid: t.Metadata.Uid}
+	w.tags[k] = tg
+	return clone(tg), nil
+}
+
+func (s *controlServer) GetTag(_ context.Context, in *ateapi.GetTagRequest) (*ateapi.Tag, error) {
+	w := s.w
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	tg := w.tags[refKey(in.GetTag())]
+	if tg == nil {
+		return nil, notFound("tag", refKey(in.GetTag()))
+	}
+	return clone(tg), nil
+}
+
+func (s *controlServer) ListTags(_ context.Context, in *ateapi.ListTagsRequest) (*ateapi.ListTagsResponse, error) {
+	w := s.w
+	w.mu.Lock()
+	all := clones(w.tags, func(t *ateapi.Tag) bool { return in.GetAtespace() == "" || t.Metadata.Atespace == in.GetAtespace() })
+	w.mu.Unlock()
+	items, next, err := page(all, in.GetOptions())
+	if err != nil {
+		return nil, err
+	}
+	return &ateapi.ListTagsResponse{Tags: items, NextPageToken: next}, nil
+}
+
+// UpdateTag changes only the scope (publish or unpublish).
+func (s *controlServer) UpdateTag(_ context.Context, in *ateapi.UpdateTagRequest) (*ateapi.Tag, error) {
+	w := s.w
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	md := in.GetTag().GetMetadata()
+	tg := w.tags[key(md.GetAtespace(), md.GetName())]
+	if tg == nil {
+		return nil, notFound("tag", key(md.GetAtespace(), md.GetName()))
+	}
+	if md.GetVersion() != tg.Metadata.Version || md.GetUid() != tg.Metadata.Uid {
+		return nil, status.Errorf(codes.FailedPrecondition, "tag %s: version and uid preconditions do not match", key(md.GetAtespace(), md.GetName()))
+	}
+	switch sc := in.GetTag().GetScope(); sc {
+	case ateapi.TagScope_TAG_SCOPE_ATESPACE, ateapi.TagScope_TAG_SCOPE_PUBLISHED:
+		tg.Scope = sc
+	default:
+		return nil, status.Error(codes.InvalidArgument, "tag scope is required")
+	}
+	touch(tg.Metadata, w.clock.Now())
+	return clone(tg), nil
+}
+
+// DeleteTag removes a tag even while actors created from it have not been
+// suspended yet, as Substrate does (#1554). Such an actor keeps running in
+// the fake; on a real cluster it could not be restored again.
+func (s *controlServer) DeleteTag(_ context.Context, in *ateapi.DeleteTagRequest) (*ateapi.Tag, error) {
+	w := s.w
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	k := refKey(in.GetTag())
+	tg := w.tags[k]
+	if tg == nil {
+		return nil, notFound("tag", k)
+	}
+	delete(w.tags, k)
+	tg.Metadata.DeleteTime = ts(w.clock.Now())
+	return tg, nil
+}
+
+// Tag returns a copy of a tag, or nil.
+func (w *World) Tag(atespace, name string) *ateapi.Tag {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if tg := w.tags[key(atespace, name)]; tg != nil {
+		return clone(tg)
+	}
+	return nil
 }
 
 // ---------- egress policies ----------
