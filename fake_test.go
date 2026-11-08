@@ -79,16 +79,34 @@ func TestLifecycle(t *testing.T) {
 		EgressPolicy: &ateapi.EgressPolicy{Metadata: &ateapi.ResourceMetadata{Name: "custom"}}}); code(err) != codes.InvalidArgument {
 		t.Fatalf("egress policy named other than default: %v", err)
 	}
-	overlap := &ateapi.EgressPolicy{Rules: []*ateapi.EgressRule{
-		{Http: &ateapi.HttpRule{Hostnames: []string{"*"}, Ports: &ateapi.Ports{All: &ateapi.AllPorts{}}}},
-		{TlsPassthrough: &ateapi.TlsPassthroughRule{Hostnames: []string{"*"}, Ports: &ateapi.Ports{Numbers: []int32{443}}}},
-	}}
-	if _, err := api.UpdateActorEgressPolicy(ctx, &ateapi.UpdateActorEgressPolicyRequest{Actor: ref("s1", "a1"), EgressPolicy: overlap}); code(err) != codes.InvalidArgument {
-		t.Fatalf("overlapping rules: %v", err)
-	}
-	overlap.Rules[0].GetHttp().Ports = &ateapi.Ports{Numbers: []int32{80}}
-	if _, err := api.UpdateActorEgressPolicy(ctx, &ateapi.UpdateActorEgressPolicyRequest{Actor: ref("s1", "a1"), EgressPolicy: overlap}); err != nil {
-		t.Fatalf("rules on different ports: %v", err)
+	// Ties follow Substrate's own validation: same pattern string, same port
+	// key, any protocols. Defaults apply first (http 80, https 443).
+	all := &ateapi.Ports{All: &ateapi.AllPorts{}}
+	for _, tc := range []struct {
+		name  string
+		rules []*ateapi.EgressRule
+		tie   bool
+	}{
+		{"http and tls on every port", []*ateapi.EgressRule{
+			{Http: &ateapi.HttpRule{Hostnames: []string{"*"}, Ports: all}},
+			{TlsPassthrough: &ateapi.TlsPassthroughRule{Hostnames: []string{"*"}, Ports: all}}}, true},
+		{"http on every port, tls on 443", []*ateapi.EgressRule{
+			{Http: &ateapi.HttpRule{Hostnames: []string{"*"}, Ports: all}},
+			{TlsPassthrough: &ateapi.TlsPassthroughRule{Hostnames: []string{"*"}, Ports: &ateapi.Ports{Numbers: []int32{443}}}}}, false},
+		{"two http rules on the default port", []*ateapi.EgressRule{
+			{Http: &ateapi.HttpRule{Hostnames: []string{"api.example.com"}}},
+			{Http: &ateapi.HttpRule{Hostnames: []string{"api.example.com"}}}}, true},
+		{"wildcard and specific host on one port", []*ateapi.EgressRule{
+			{Http: &ateapi.HttpRule{Hostnames: []string{"*"}}},
+			{Http: &ateapi.HttpRule{Hostnames: []string{"api.example.com"}}}}, false},
+		{"https and tls on 443", []*ateapi.EgressRule{
+			{Https: &ateapi.HttpsRule{Hostnames: []string{"*.example.com"}}},
+			{TlsPassthrough: &ateapi.TlsPassthroughRule{Hostnames: []string{"*.example.com"}, Ports: &ateapi.Ports{Numbers: []int32{443}}}}}, true},
+	} {
+		_, err := api.UpdateActorEgressPolicy(ctx, &ateapi.UpdateActorEgressPolicyRequest{Actor: ref("s1", "a1"), EgressPolicy: &ateapi.EgressPolicy{Rules: tc.rules}})
+		if tie := code(err) == codes.InvalidArgument; tie != tc.tie || (!tc.tie && err != nil) {
+			t.Errorf("%s: err %v, want tie %v", tc.name, err, tc.tie)
+		}
 	}
 	if p := c.World.Policy("s1", "a1"); p.GetMetadata().GetName() != "default" {
 		t.Fatalf("egress policy name = %q", p.GetMetadata().GetName())
@@ -118,7 +136,7 @@ func TestLifecycle(t *testing.T) {
 	}
 
 	want := []string{"CreateAtespace s1", "CreateActorTemplate s1/t1", "GetActorTemplate s1/t1", "GetActorTemplate s1/t1", "CreateActor s1/a1",
-		"CreateActorEgressPolicy s1/a1", "UpdateActorEgressPolicy s1/a1", "UpdateActorEgressPolicy s1/a1", "UpdateActorEgressPolicy s1/a1", "ResumeActor s1/a1", "SuspendActor s1/a1", "DeleteActor s1/a1", "DeleteActor s1/a1"}
+		"CreateActorEgressPolicy s1/a1", "UpdateActorEgressPolicy s1/a1", "UpdateActorEgressPolicy s1/a1", "UpdateActorEgressPolicy s1/a1", "UpdateActorEgressPolicy s1/a1", "UpdateActorEgressPolicy s1/a1", "UpdateActorEgressPolicy s1/a1", "ResumeActor s1/a1", "SuspendActor s1/a1", "DeleteActor s1/a1", "DeleteActor s1/a1"}
 	if got := c.World.CallNames(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}

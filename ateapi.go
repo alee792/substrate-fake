@@ -2,6 +2,7 @@ package substratefake
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -515,48 +516,69 @@ func (s *controlServer) DeleteActor(_ context.Context, in *ateapi.DeleteActorReq
 // Substrate v1.0.0 rejects others with "must be default".
 const egressPolicyName = "default"
 
-// checkPolicy applies the validation real Substrate does on egress
-// policies: the name, and no two rules covering the same hostname pattern
-// on the same port, whatever their protocols. An all-ports rule overlaps
-// every port.
+// checkPolicy applies the validation Substrate v1.0.0 does on egress
+// policies (cmd/ateapi/internal/apivalidation/egress_policy.go): the name,
+// default ports, and no two rules that tie on a hostname pattern and a port,
+// whatever their protocols. Patterns compare as strings, so "*" and
+// "api.example.com" never tie, and an all-ports rule ties only with another
+// all-ports rule.
 func checkPolicy(p *ateapi.EgressPolicy) error {
 	if n := p.GetMetadata().GetName(); n != "" && n != egressPolicyName {
 		return status.Error(codes.InvalidArgument, "egress_policy.metadata.name: must be default")
 	}
-	type use struct {
-		rule int
-		all  bool
-		port int32
+	type key struct {
+		pattern string
+		all     bool
+		port    int32
 	}
-	seen := map[string][]use{}
+	type match struct {
+		rule int
+		path string
+	}
+	seen := map[key]match{}
 	for i, r := range p.GetRules() {
+		var member string
 		var hosts []string
 		var ports *ateapi.Ports
+		var def int32
 		switch {
 		case r.GetHttp() != nil:
-			hosts, ports = r.GetHttp().GetHostnames(), r.GetHttp().GetPorts()
+			member, hosts, ports, def = "http", r.GetHttp().GetHostnames(), r.GetHttp().GetPorts(), 80
 		case r.GetHttps() != nil:
-			hosts, ports = r.GetHttps().GetHostnames(), r.GetHttps().GetPorts()
+			member, hosts, ports, def = "https", r.GetHttps().GetHostnames(), r.GetHttps().GetPorts(), 443
 		case r.GetTlsPassthrough() != nil:
-			hosts, ports = r.GetTlsPassthrough().GetHostnames(), r.GetTlsPassthrough().GetPorts()
+			member, hosts, ports = "tls_passthrough", r.GetTlsPassthrough().GetHostnames(), r.GetTlsPassthrough().GetPorts()
+		default:
+			continue
 		}
-		var uses []use
-		if ports.GetAll() != nil {
-			uses = []use{{rule: i, all: true}}
+		var keys []key
+		switch {
+		case ports == nil && def == 0:
+			return status.Errorf(codes.InvalidArgument, "egress_policy.rules[%d].%s.ports: Required value", i, member)
+		case ports == nil:
+			keys = []key{{port: def}}
+		case ports.GetAll() != nil:
+			keys = []key{{all: true}}
 		}
 		for _, n := range ports.GetNumbers() {
-			uses = append(uses, use{rule: i, port: n})
+			keys = append(keys, key{port: n})
 		}
-		for _, h := range hosts {
-			for _, u := range uses {
-				for _, prev := range seen[h] {
-					if prev.rule != u.rule && (prev.all || u.all || prev.port == u.port) {
-						return status.Errorf(codes.InvalidArgument,
-							"egress_policy.rules[%d]: hostname %q overlaps rules[%d] on the same port", u.rule, h, prev.rule)
+		for j, h := range hosts {
+			path := fmt.Sprintf("egress_policy.rules[%d].%s.hostnames[%d]", i, member, j)
+			for _, k := range keys {
+				k.pattern = h
+				prior, ok := seen[k]
+				switch {
+				case !ok:
+					seen[k] = match{rule: i, path: path}
+				case prior.rule != i:
+					where := fmt.Sprintf("port %d", k.port)
+					if k.all {
+						where = "every port"
 					}
+					return status.Errorf(codes.InvalidArgument, "%s: Invalid value: %q: ties with %s on %s", path, h, prior.path, where)
 				}
 			}
-			seen[h] = append(seen[h], uses...)
 		}
 	}
 	return nil
