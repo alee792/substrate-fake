@@ -59,7 +59,7 @@ Leave out `NoServers` to get the TLS endpoint, the Kubernetes API and Prometheus
 - **Access.** Tokens are JWTs the fake signs: `World.IssueToken(principal, …)`, or a Kubernetes TokenRequest for any ServiceAccount. The issuer is the Kubernetes API's URL, which serves `/.well-known/openid-configuration` and its keys. ate-client is a bootstrap owner, as `ate-setup` makes it by default. `World.Grant` binds owner or viewer globally, or owner, editor or viewer on one atespace, and every RPC is checked against the table in Substrate's [authorization guide](https://github.com/agent-substrate/substrate/blob/v1.0.0/docs/guides/authorization.md), with ateapi's `PermissionDenied` wording. `World.TrustAudience` adds an audience, as adding it to a JWT provider does. The demo scenario grants two more people: `DemoOnCall`, a global viewer, and `DemoTriageDev`, an editor of `triage` only; the CLI writes a token file for each.
 - **Faults.** Any ateapi method can be made to fail with a code, slow down, or both, for a number of calls or forever.
 
-Not faked: port-forwarding (pass the endpoint directly), watch streams, the access policy RPCs (use `World.Grant`), groups, pod certificates, tags and the worker-side services. Unimplemented methods return Unimplemented.
+Not faked: port-forwarding (pass the endpoint directly), watch streams, the access policy RPCs (use `World.Grant`), groups, pod certificates and the worker-side services. Tags are faked (`CreateTag`, `GetTag`, `ListTags`, `UpdateTag`, `DeleteTag` and `CreateActor` with `source_tag`), with no guest state behind them. Unimplemented methods return Unimplemented.
 
 [ASSUMPTIONS.md](ASSUMPTIONS.md) lists where the API docs were silent and the fake had to pick a behaviour.
 

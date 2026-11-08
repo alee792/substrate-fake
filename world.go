@@ -125,6 +125,7 @@ type World struct {
 	templates map[string]*ateapi.ActorTemplate // "atespace/name"
 	actors    map[string]*ateapi.Actor
 	policies  map[string]*ateapi.EgressPolicy // by actor
+	tags      map[string]*ateapi.Tag          // "atespace/name"
 	workers   map[string]*ateapi.Worker
 	pools     []*Pool
 	logs      map[string][]LogLine // by worker pod, "namespace/pod"
@@ -157,7 +158,7 @@ func NewWorld(clock Clock) *World {
 	return &World{
 		clock: clock, rng: rand.New(rand.NewPCG(1, 2)), Name: "fake",
 		atespaces: map[string]*ateapi.Atespace{}, templates: map[string]*ateapi.ActorTemplate{},
-		actors: map[string]*ateapi.Actor{}, policies: map[string]*ateapi.EgressPolicy{},
+		actors: map[string]*ateapi.Actor{}, policies: map[string]*ateapi.EgressPolicy{}, tags: map[string]*ateapi.Tag{},
 		workers: map[string]*ateapi.Worker{}, logs: map[string][]LogLine{}, bound: map[string]time.Time{},
 		profiles: map[string]Profile{}, goldenErr: map[string]string{}, faults: map[string][]*Fault{}, access: newAccess(),
 		DefaultProfile: Profile{
