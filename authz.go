@@ -268,6 +268,8 @@ func checks(req any) ([]check, bool) {
 		return []check{global("can_list_workers", RoleViewer)}, true
 	case *ateapi.GetWorkerRequest:
 		return []check{global("can_get", RoleViewer)}, true
+	case *ateapi.ListWorkerActorAssignmentsRequest:
+		return []check{global("can_list_actor_assignments", RoleViewer)}, true
 	case *ateapi.DrainWorkerRequest:
 		return []check{global("can_drain", RoleOwner)}, true
 	}
@@ -281,10 +283,14 @@ func (a *access) authorize(principal, fullMethod string, req any) error {
 	if !ok {
 		return status.Errorf(codes.PermissionDenied, "permission denied: no authorization rule for %s", fullMethod)
 	}
+	// Like ateapi, a missing resource name is InvalidArgument before any
+	// check runs.
 	for _, c := range cs {
 		if !c.global && c.atespace == "" {
 			return status.Error(codes.InvalidArgument, "atespace is required")
 		}
+	}
+	for _, c := range cs {
 		scope := c.atespace
 		if c.global {
 			scope = ""

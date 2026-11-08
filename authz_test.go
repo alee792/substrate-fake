@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -16,6 +17,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 func dialAs(t *testing.T, c *Cluster, token string) ateapi.ControlClient {
@@ -74,6 +78,10 @@ func TestAccess(t *testing.T) {
 			_, err := api.SuspendActor(ctx, &ateapi.SuspendActorRequest{Actor: triageActor})
 			return err
 		}},
+		{"ListWorkerActorAssignments", func(api ateapi.ControlClient) error {
+			_, err := api.ListWorkerActorAssignments(ctx, &ateapi.ListWorkerActorAssignmentsRequest{Worker: &ateapi.ObjectRef{Name: "gvisor-pool-a-1"}})
+			return err
+		}},
 		{"DrainWorker", func(api ateapi.ControlClient) error {
 			_, err := api.DrainWorker(ctx, &ateapi.DrainWorkerRequest{Worker: &ateapi.ObjectRef{Name: "nope"}})
 			return err
@@ -81,10 +89,10 @@ func TestAccess(t *testing.T) {
 	}
 	// Owner passes every check; DrainWorker then fails on the missing worker.
 	want := map[string][]codes.Code{
-		ClientPrincipal: {codes.OK, codes.OK, codes.OK, codes.OK, codes.OK, codes.OK, codes.NotFound},
-		viewer:          {codes.OK, codes.OK, codes.OK, codes.OK, codes.OK, codes.PermissionDenied, codes.PermissionDenied},
-		editor:          {codes.PermissionDenied, codes.PermissionDenied, codes.OK, codes.PermissionDenied, codes.OK, codes.OK, codes.PermissionDenied},
-		nobody:          {codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied},
+		ClientPrincipal: {codes.OK, codes.OK, codes.OK, codes.OK, codes.OK, codes.OK, codes.OK, codes.NotFound},
+		viewer:          {codes.OK, codes.OK, codes.OK, codes.OK, codes.OK, codes.PermissionDenied, codes.OK, codes.PermissionDenied},
+		editor:          {codes.PermissionDenied, codes.PermissionDenied, codes.OK, codes.PermissionDenied, codes.OK, codes.OK, codes.PermissionDenied, codes.PermissionDenied},
+		nobody:          {codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied, codes.PermissionDenied},
 	}
 	for principal, codesWant := range want {
 		api := dialAs(t, c, c.World.IssueToken(principal, TokenOptions{}))
@@ -175,5 +183,43 @@ func TestTokenDiscovery(t *testing.T) {
 	}
 	if claims.Subject != "system:serviceaccount:ate-users:alice" || claims.Issuer != c.KubeURL {
 		t.Fatalf("claims %+v", claims)
+	}
+}
+
+// Every Control method the fake serves has an access rule, as ateapi
+// requires of every RPC it serves.
+func TestEveryServedMethodHasARule(t *testing.T) {
+	c := start(t, Options{NoServers: true})
+	conn, err := grpc.NewClient("passthrough:///substrate-fake",
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return c.buf.DialContext(ctx) }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	served := 0
+	svc := ateapi.File_api_ateapi_v1_ateapi_proto.Services().ByName("Control")
+	for i := 0; i < svc.Methods().Len(); i++ {
+		m := svc.Methods().Get(i)
+		if m.IsStreamingClient() || m.IsStreamingServer() {
+			continue
+		}
+		req := dynamicpb.NewMessage(m.Input())
+		out := dynamicpb.NewMessage(m.Output())
+		err := conn.Invoke(context.Background(), "/"+string(svc.FullName())+"/"+string(m.Name()), req, out)
+		if code(err) == codes.Unimplemented {
+			continue
+		}
+		served++
+		typed, err2 := protoregistry.GlobalTypes.FindMessageByName(m.Input().FullName())
+		if err2 != nil {
+			t.Fatal(err2)
+		}
+		if _, ok := checks(typed.New().Interface()); !ok {
+			t.Errorf("%s is served but has no access rule", m.Name())
+		}
+	}
+	if served < 20 {
+		t.Fatalf("only %d methods looked served; the probe is broken", served)
 	}
 }
