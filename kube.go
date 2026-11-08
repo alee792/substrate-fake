@@ -189,6 +189,18 @@ func (k *kubeAPI) podLog(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	if s := q.Get("sinceTime"); s != "" {
+		since, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			writeStatus(rw, http.StatusBadRequest, "BadRequest", "sinceTime: "+err.Error())
+			return
+		}
+		i := 0
+		for i < len(lines) && lines[i].Time.Before(since) {
+			i++
+		}
+		lines = lines[i:]
+	}
 	if n, err := strconv.Atoi(q.Get("tailLines")); err == nil && n >= 0 && n < len(lines) {
 		lines = lines[len(lines)-n:]
 	}

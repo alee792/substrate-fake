@@ -143,7 +143,13 @@ func Demo(w *World) {
 		w.AddActor(a)
 	}
 	running("triage", "triage-7f3a", "agent-devbox-v12", "gvisor-pool-a", 12*time.Minute)
-	w.AppendLog("triage", "triage-7f3a",
+	// The worker's log starts with whatever ran there before triage-7f3a.
+	_ = w.AppendLog("triage", "triage-7f3a",
+		LogLine{ago(55 * time.Minute), "session resumed from generation 3"},
+		LogLine{ago(54 * time.Minute), "triage: classified 212 alerts, 3 escalated"},
+		LogLine{ago(41 * time.Minute), "idle 10m, ready to suspend"},
+	)
+	_ = w.AppendLog("triage", "triage-7f3a",
 		LogLine{ago(12 * time.Minute), "session resumed from generation 9"},
 		LogLine{ago(11 * time.Minute), "bash: npm install (412 packages)"},
 		LogLine{ago(10 * time.Minute), "node --max-old-space-size=3072 build.js"},
