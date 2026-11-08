@@ -392,3 +392,43 @@ func TestFailedResumesAreFast(t *testing.T) {
 		t.Errorf("share of failed resumes under 10 ms = %.2f, want nearly all", v)
 	}
 }
+
+// update_time moves on any write, so the assignment says when an actor
+// arrived on its worker.
+func TestAssignmentMarksArrival(t *testing.T) {
+	ctx := context.Background()
+	clock := NewManualClock(time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC))
+	c := start(t, Options{NoServers: true, Clock: clock})
+	api := c.Client()
+	c.World.AddTemplate(TemplateSpec{Atespace: "s1", Name: "t1", Image: "img:1"}.Proto())
+	if _, err := api.CreateActor(ctx, &ateapi.CreateActorRequest{Actor: &ateapi.Actor{Metadata: &ateapi.ResourceMetadata{Atespace: "s1", Name: "a1"}, ActorTemplate: ref("", "t1")}}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := api.ResumeActor(ctx, &ateapi.ResumeActorRequest{Actor: ref("s1", "a1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumedAt := clock.Now()
+	worker := r.Actor.Status.WorkerAssignment.GetWorker()
+
+	clock.Advance(5 * time.Minute)
+	c.World.Touch("s1", "a1") // say, a snapshot report
+	a, _ := api.GetActor(ctx, &ateapi.GetActorRequest{Actor: ref("s1", "a1")})
+	if !a.Metadata.UpdateTime.AsTime().Equal(clock.Now()) {
+		t.Fatalf("update_time %v after a write at %v", a.Metadata.UpdateTime.AsTime(), clock.Now())
+	}
+	l, err := api.ListWorkerActorAssignments(ctx, &ateapi.ListWorkerActorAssignmentsRequest{Worker: worker})
+	if err != nil || len(l.ActorAssignments) != 1 {
+		t.Fatalf("assignments: %v %v", l, err)
+	}
+	if as := l.ActorAssignments[0]; as.ActorUid != a.Metadata.Uid || !as.Metadata.CreateTime.AsTime().Equal(resumedAt) {
+		t.Fatalf("assignment %v, want uid %s created %v", as, a.Metadata.Uid, resumedAt)
+	}
+
+	if _, err := api.SuspendActor(ctx, &ateapi.SuspendActorRequest{Actor: ref("s1", "a1")}); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := api.ListWorkerActorAssignments(ctx, &ateapi.ListWorkerActorAssignmentsRequest{Worker: worker}); len(l.GetActorAssignments()) != 0 {
+		t.Fatalf("assignment outlived suspend: %v", l)
+	}
+}

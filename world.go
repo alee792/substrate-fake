@@ -126,6 +126,7 @@ type World struct {
 	workers   map[string]*ateapi.Worker
 	pools     []*Pool
 	logs      map[string][]LogLine // by worker pod, "namespace/pod"
+	bound     map[string]time.Time // when each assigned actor was bound, by actor UID
 	crashes   []CrashEvent
 	profiles  map[string]Profile // by template
 	goldenErr map[string]string  // by template, applied at creation
@@ -154,7 +155,7 @@ func NewWorld(clock Clock) *World {
 		clock: clock, rng: rand.New(rand.NewPCG(1, 2)), Name: "fake",
 		atespaces: map[string]*ateapi.Atespace{}, templates: map[string]*ateapi.ActorTemplate{},
 		actors: map[string]*ateapi.Actor{}, policies: map[string]*ateapi.EgressPolicy{},
-		workers: map[string]*ateapi.Worker{}, logs: map[string][]LogLine{},
+		workers: map[string]*ateapi.Worker{}, logs: map[string][]LogLine{}, bound: map[string]time.Time{},
 		profiles: map[string]Profile{}, goldenErr: map[string]string{}, faults: map[string][]*Fault{},
 		DefaultProfile: Profile{
 			ResumesPerSecond: func(time.Time) float64 { return 0.02 },
@@ -197,6 +198,19 @@ func (w *World) meta(m *ateapi.ResourceMetadata, now time.Time) *ateapi.Resource
 		m.UpdateTime = m.CreateTime
 	}
 	return m
+}
+
+// Touch writes to an actor without changing its state, as ateapi does when
+// atelet reports a snapshot, a tag is taken, or UpdateActor is called. It
+// moves metadata.update_time, which is why update_time doesn't say when the
+// state began.
+func (w *World) Touch(atespace, name string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.tick()
+	if a := w.actors[key(atespace, name)]; a != nil {
+		touch(a.Metadata, w.clock.Now())
+	}
 }
 
 func touch(m *ateapi.ResourceMetadata, now time.Time) {
@@ -301,6 +315,7 @@ func (w *World) AddActor(a *ateapi.Actor) {
 		if wk := w.workers[wa.GetWorker().GetName()]; wk != nil {
 			w.fillAssignment(wa, wk)
 			wk.Status.Allocated.Actors++
+			w.bound[a.Metadata.Uid] = a.Metadata.UpdateTime.AsTime()
 		}
 	}
 	if c := a.Status.Crash; c != nil {
@@ -568,6 +583,7 @@ func (w *World) assign(a *ateapi.Actor, wk *ateapi.Worker) {
 	a.Status.WorkerAssignment = wa
 	a.Status.AssignedNode = wk.NodeName
 	wk.Status.Allocated.Actors++
+	w.bound[a.Metadata.Uid] = w.clock.Now()
 }
 
 // release frees an actor's worker. The assigned node stays, as ateapi keeps
@@ -581,6 +597,7 @@ func (w *World) release(a *ateapi.Actor) {
 		wk.Status.Allocated.Actors--
 	}
 	a.Status.WorkerAssignment = nil
+	delete(w.bound, a.Metadata.Uid)
 }
 
 // poolOf is the pool an actor runs in, or would be scheduled to.
@@ -611,6 +628,7 @@ func (w *World) selectorFor(a *ateapi.Actor) map[string]string {
 func (w *World) podLogs(namespace, pod string) ([]LogLine, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.tick() // a due transition may move an actor onto this pod
 	for _, wk := range w.workers {
 		if wk.WorkerNamespace == namespace && wk.WorkerPod == pod {
 			return slices.Clone(w.logs[key(namespace, pod)]), true

@@ -598,6 +598,39 @@ func (s *controlServer) GetWorker(_ context.Context, in *ateapi.GetWorkerRequest
 	return clone(wk), nil
 }
 
+// ListWorkerActorAssignments lists the actors bound to a worker. Each
+// assignment is created when a resume binds the actor and removed when it is
+// released, so its create_time is when the actor arrived on the worker.
+func (s *controlServer) ListWorkerActorAssignments(_ context.Context, in *ateapi.ListWorkerActorAssignmentsRequest) (*ateapi.ListWorkerActorAssignmentsResponse, error) {
+	w := s.w
+	w.mu.Lock()
+	w.tick()
+	name := in.GetWorker().GetName()
+	if w.workers[name] == nil {
+		w.mu.Unlock()
+		return nil, notFound("worker", name)
+	}
+	var all []*ateapi.ActorAssignment
+	for _, a := range w.actors {
+		if a.Status.GetWorkerAssignment().GetWorker().GetName() != name {
+			continue
+		}
+		at := ts(w.bound[a.Metadata.Uid])
+		all = append(all, &ateapi.ActorAssignment{
+			Metadata: &ateapi.ResourceMetadata{Name: a.Metadata.Uid, Version: 1, CreateTime: at, UpdateTime: at},
+			Actor:    &ateapi.ObjectRef{Atespace: a.Metadata.Atespace, Name: a.Metadata.Name},
+			ActorUid: a.Metadata.Uid,
+		})
+	}
+	w.mu.Unlock()
+	slices.SortFunc(all, func(a, b *ateapi.ActorAssignment) int { return strings.Compare(a.ActorUid, b.ActorUid) })
+	items, next, err := page(all, in.GetOptions())
+	if err != nil {
+		return nil, err
+	}
+	return &ateapi.ListWorkerActorAssignmentsResponse{ActorAssignments: items, NextPageToken: next}, nil
+}
+
 // DrainWorker marks a worker DRAINING so nothing new lands on it. Actors on
 // it are left alone, as the API documents.
 func (s *controlServer) DrainWorker(_ context.Context, in *ateapi.DrainWorkerRequest) (*ateapi.DrainWorkerResponse, error) {
