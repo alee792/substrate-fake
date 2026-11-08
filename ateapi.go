@@ -11,7 +11,6 @@ import (
 	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -24,17 +23,22 @@ type controlServer struct {
 	w *World
 }
 
-// interceptor records each call, applies injected faults, and, when token is
-// set, requires it as a bearer token.
-func (w *World) interceptor(token string) grpc.UnaryServerInterceptor {
+// interceptor records each call and applies injected faults. With auth on,
+// it authenticates and authorizes the call as ateapi does (see authz.go);
+// token is the raw Options.Token, accepted as ClientPrincipal.
+func (w *World) interceptor(auth bool, token string) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
 		method := info.FullMethod[strings.LastIndexByte(info.FullMethod, '/')+1:]
 		call := Call{Method: method, Target: target(req), Time: w.Now()}
 		resp, err := func() (any, error) {
-			if token != "" {
-				md, _ := metadata.FromIncomingContext(ctx)
-				if v := md.Get("authorization"); len(v) == 0 || v[0] != "Bearer "+token {
-					return nil, status.Error(codes.Unauthenticated, "missing or wrong bearer token")
+			if auth {
+				principal, err := w.access.authenticate(ctx, w.Now(), token)
+				if err != nil {
+					return nil, err
+				}
+				call.Principal = principal
+				if err := w.access.authorize(principal, info.FullMethod, req); err != nil {
+					return nil, err
 				}
 			}
 			if f := w.fault(method); f != nil {

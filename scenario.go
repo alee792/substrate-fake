@@ -75,8 +75,18 @@ const gib = int64(1) << 30
 //
 // New templates take 25 seconds to get a golden snapshot, and resumes take
 // half a second.
+// Demo principals: an on-call engineer who can see the whole cluster, and a
+// developer who can change the triage atespace and see nothing else.
+const (
+	DemoOnCall    = "system:serviceaccount:ate-users:oncall"
+	DemoTriageDev = "system:serviceaccount:ate-users:triage-dev"
+)
+
 func Demo(w *World) {
 	w.Name = "demo-cluster"
+	// Two people besides the shared ate-client owner.
+	w.Grant("", DemoOnCall, RoleViewer)
+	w.Grant("triage", DemoTriageDev, RoleEditor)
 	w.GoldenDelay = 25 * time.Second
 	w.ResumeDelay = 500 * time.Millisecond
 	now := w.Now()

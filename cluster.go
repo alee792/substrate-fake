@@ -2,10 +2,8 @@ package substratefake
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -37,8 +35,10 @@ type Options struct {
 	Dir string
 	// Addr is the host to listen on. Default: 127.0.0.1.
 	Addr string
-	// Token is the bearer token ateapi and the Kubernetes API accept.
-	// Default: random.
+	// Token is the kubeconfig's bearer token for the Kubernetes API, which
+	// ateapi also accepts as ClientPrincipal. Default: a signed
+	// ServiceAccount token for ate-client, valid for a year. Use
+	// World.IssueToken for other principals.
 	Token string
 	// NoServers skips the network listeners; only Client works. Useful in
 	// unit tests that need nothing but ateapi.
@@ -77,18 +77,16 @@ func Start(ctx context.Context, opts Options) (*Cluster, error) {
 	}
 	opts.Scenario(w)
 	c := &Cluster{World: w, Router: &Router{w: w, routes: map[string]string{}}, Token: opts.Token}
-	if c.Token == "" {
-		b := make([]byte, 24)
-		_, _ = rand.Read(b)
-		c.Token = hex.EncodeToString(b)
-	}
 
 	// In-process ateapi, no TLS or auth.
 	c.buf = bufconn.Listen(1 << 20)
-	c.bufServer = grpc.NewServer(grpc.UnaryInterceptor(w.interceptor("")))
+	c.bufServer = grpc.NewServer(grpc.UnaryInterceptor(w.interceptor(false, "")))
 	ateapi.RegisterControlServer(c.bufServer, &controlServer{w: w})
 	go func() { _ = c.bufServer.Serve(c.buf) }()
 	if opts.NoServers {
+		if c.Token == "" {
+			c.Token = c.clientToken()
+		}
 		return c, nil
 	}
 
@@ -120,9 +118,22 @@ func (c *Cluster) serve(_ context.Context, opts Options) error {
 		return err
 	}
 	c.APIEndpoint = lis.Addr().String()
+
+	// The Kubernetes API is the token issuer, so its URL comes first.
+	klis, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		return err
+	}
+	c.KubeURL = "https://" + klis.Addr().String()
+	c.World.setIssuer(c.KubeURL)
+	raw := c.Token
+	if c.Token == "" {
+		c.Token = c.clientToken()
+	}
+
 	c.grpcServer = grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(&tls.Config{Certificates: []tls.Certificate{apiCert}, MinVersion: tls.VersionTLS13})),
-		grpc.UnaryInterceptor(c.World.interceptor(c.Token)),
+		grpc.UnaryInterceptor(c.World.interceptor(true, raw)),
 	)
 	ateapi.RegisterControlServer(c.grpcServer, &controlServer{w: c.World})
 	go func() { _ = c.grpcServer.Serve(lis) }()
@@ -133,11 +144,6 @@ func (c *Cluster) serve(_ context.Context, opts Options) error {
 		return err
 	}
 	kube := &kubeAPI{w: c.World, token: c.Token, caPEM: ca.PEM, started: c.World.Now(), tokenTTL: time.Hour}
-	klis, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
-	if err != nil {
-		return err
-	}
-	c.KubeURL = "https://" + klis.Addr().String()
 	ks := &http.Server{Handler: kube.handler(), ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{kubeCert}, MinVersion: tls.VersionTLS12}}
 	go func() { _ = ks.ServeTLS(klis, "", "") }()
@@ -183,6 +189,11 @@ contexts:
     user: %[1]s
 current-context: %[1]s
 `, c.Context, c.KubeURL, base64.StdEncoding.EncodeToString(c.CAPEM), c.Token)
+}
+
+// clientToken is the kubeconfig's token: ate-client's, for a year.
+func (c *Cluster) clientToken() string {
+	return c.World.IssueToken(ClientPrincipal, TokenOptions{TTL: 365 * 24 * time.Hour})
 }
 
 // Client returns an ateapi client connected in process. It skips TLS and

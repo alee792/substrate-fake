@@ -4,8 +4,8 @@ A fake [Agent Substrate](https://github.com/agent-substrate/substrate) cluster f
 
 | Real thing | The fake |
 |---|---|
-| ateapi (`ateapi.v1.Control`) | gRPC over TLS for `api.ate-system.svc`, bearer-token auth. Also in process with `Cluster.Client()`. |
-| Kubernetes API | The parts Substrate clients read: WorkerPools, the ClusterTrustBundle that roots ateapi's certificate, ate-client token requests, worker pod logs. A kubeconfig is written for it. |
+| ateapi (`ateapi.v1.Control`) | gRPC over TLS for `api.ate-system.svc`. Authenticates bearer JWTs and authorizes each call against access policies, as ateapi does. Also in process with `Cluster.Client()`, which skips both. |
+| Kubernetes API | The parts Substrate clients read: WorkerPools, the ClusterTrustBundle that roots ateapi's certificate, ServiceAccount token requests, OIDC discovery for the token issuer, worker pod logs. A kubeconfig is written for it. |
 | Prometheus | The HTTP query API, evaluated by the real PromQL engine over series generated from the world's state. |
 | atenet-router | `Router.Dial(atespace, actor, port)`, reaching whatever a test exposed for a running actor. |
 
@@ -41,6 +41,9 @@ c.Router.Expose("s1", "a1", 8080, lis.Addr().String())
 
 // ... run the code under test ...
 
+alice := c.World.IssueToken("system:serviceaccount:ate-users:alice", substratefake.TokenOptions{})
+c.World.Grant("s1", "system:serviceaccount:ate-users:alice", substratefake.RoleViewer)
+
 c.World.CallNames() // ["CreateActor s1/a1", "CreateActorEgressPolicy s1/a1", "ResumeActor s1/a1", ...]
 c.World.Crash("s1", "a1", "OOM")
 ```
@@ -53,9 +56,10 @@ Leave out `NoServers` to get the TLS endpoint, the Kubernetes API and Prometheus
 - **Templates.** Create starts the golden snapshot (ready at once, or after `GoldenDelay`). `FailGolden` makes it fail. Templates can't be updated, as in Substrate.
 - **Workers.** `DrainWorker` marks a worker DRAINING and leaves its actor alone, as the API documents.
 - **Metrics.** `ate.actor.lifecycle.operation.duration` (resume, with `error.type` on failures) per template, from each template's `Profile`, and `ate.actor.crashes` from real crash events. Series are generated for whatever range a query asks for.
+- **Access.** Tokens are JWTs the fake signs: `World.IssueToken(principal, …)`, or a Kubernetes TokenRequest for any ServiceAccount. The issuer is the Kubernetes API's URL, which serves `/.well-known/openid-configuration` and its keys. ate-client is a bootstrap owner, as `ate-setup` makes it by default. `World.Grant` binds owner or viewer globally, or owner, editor or viewer on one atespace, and every RPC is checked against the table in Substrate's [authorization guide](https://github.com/agent-substrate/substrate/blob/v1.0.0/docs/guides/authorization.md), with ateapi's `PermissionDenied` wording. `World.TrustAudience` adds an audience, as adding it to a JWT provider does. The demo scenario grants two more people: `DemoOnCall`, a global viewer, and `DemoTriageDev`, an editor of `triage` only; the CLI writes a token file for each.
 - **Faults.** Any ateapi method can be made to fail with a code, slow down, or both, for a number of calls or forever.
 
-Not faked: port-forwarding (pass the endpoint directly), watch streams, access policies, tags and the worker-side services. Unimplemented methods return Unimplemented.
+Not faked: port-forwarding (pass the endpoint directly), watch streams, the access policy RPCs (use `World.Grant`), groups, pod certificates, tags and the worker-side services. Unimplemented methods return Unimplemented.
 
 [ASSUMPTIONS.md](ASSUMPTIONS.md) lists where the API docs were silent and the fake had to pick a behaviour.
 
