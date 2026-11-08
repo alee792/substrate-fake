@@ -2,6 +2,7 @@ package substratefake
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"strconv"
@@ -514,6 +515,78 @@ func (s *controlServer) DeleteActor(_ context.Context, in *ateapi.DeleteActorReq
 
 // ---------- egress policies ----------
 
+// egressPolicyName is the only name an actor's egress policy may have;
+// Substrate v1.0.0 rejects others with "must be default".
+const egressPolicyName = "default"
+
+// checkPolicy applies the validation Substrate v1.0.0 does on egress
+// policies (cmd/ateapi/internal/apivalidation/egress_policy.go): the name,
+// default ports, and no two rules that tie on a hostname pattern and a port,
+// whatever their protocols. Patterns compare as strings, so "*" and
+// "api.example.com" never tie, and an all-ports rule ties only with another
+// all-ports rule.
+func checkPolicy(p *ateapi.EgressPolicy) error {
+	if n := p.GetMetadata().GetName(); n != "" && n != egressPolicyName {
+		return status.Error(codes.InvalidArgument, "egress_policy.metadata.name: must be default")
+	}
+	type key struct {
+		pattern string
+		all     bool
+		port    int32
+	}
+	type match struct {
+		rule int
+		path string
+	}
+	seen := map[key]match{}
+	for i, r := range p.GetRules() {
+		var member string
+		var hosts []string
+		var ports *ateapi.Ports
+		var def int32
+		switch {
+		case r.GetHttp() != nil:
+			member, hosts, ports, def = "http", r.GetHttp().GetHostnames(), r.GetHttp().GetPorts(), 80
+		case r.GetHttps() != nil:
+			member, hosts, ports, def = "https", r.GetHttps().GetHostnames(), r.GetHttps().GetPorts(), 443
+		case r.GetTlsPassthrough() != nil:
+			member, hosts, ports = "tls_passthrough", r.GetTlsPassthrough().GetHostnames(), r.GetTlsPassthrough().GetPorts()
+		default:
+			continue
+		}
+		var keys []key
+		switch {
+		case ports == nil && def == 0:
+			return status.Errorf(codes.InvalidArgument, "egress_policy.rules[%d].%s.ports: Required value", i, member)
+		case ports == nil:
+			keys = []key{{port: def}}
+		case ports.GetAll() != nil:
+			keys = []key{{all: true}}
+		}
+		for _, n := range ports.GetNumbers() {
+			keys = append(keys, key{port: n})
+		}
+		for j, h := range hosts {
+			path := fmt.Sprintf("egress_policy.rules[%d].%s.hostnames[%d]", i, member, j)
+			for _, k := range keys {
+				k.pattern = h
+				prior, ok := seen[k]
+				switch {
+				case !ok:
+					seen[k] = match{rule: i, path: path}
+				case prior.rule != i:
+					where := fmt.Sprintf("port %d", k.port)
+					if k.all {
+						where = "every port"
+					}
+					return status.Errorf(codes.InvalidArgument, "%s: Invalid value: %q: ties with %s on %s", path, h, prior.path, where)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (s *controlServer) GetActorEgressPolicy(_ context.Context, in *ateapi.GetActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
 	w := s.w
 	w.mu.Lock()
@@ -537,7 +610,10 @@ func (s *controlServer) CreateActorEgressPolicy(_ context.Context, in *ateapi.Cr
 		return nil, status.Errorf(codes.AlreadyExists, "actor %s already has an egress policy", k)
 	}
 	p := clone(in.GetEgressPolicy())
-	p.Metadata = w.meta(&ateapi.ResourceMetadata{Atespace: in.GetActor().GetAtespace(), Name: in.GetActor().GetName()}, w.clock.Now())
+	if err := checkPolicy(p); err != nil {
+		return nil, err
+	}
+	p.Metadata = w.meta(&ateapi.ResourceMetadata{Atespace: in.GetActor().GetAtespace(), Name: egressPolicyName}, w.clock.Now())
 	w.policies[k] = p
 	return clone(p), nil
 }
@@ -552,6 +628,9 @@ func (s *controlServer) UpdateActorEgressPolicy(_ context.Context, in *ateapi.Up
 		return nil, notFound("egress policy for actor", k)
 	}
 	p := clone(in.GetEgressPolicy())
+	if err := checkPolicy(p); err != nil {
+		return nil, err
+	}
 	p.Metadata = old.Metadata
 	touch(p.Metadata, w.clock.Now())
 	w.policies[k] = p
