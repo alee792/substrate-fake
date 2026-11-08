@@ -515,9 +515,49 @@ func (s *controlServer) DeleteActor(_ context.Context, in *ateapi.DeleteActorReq
 // Substrate v1.0.0 rejects others with "must be default".
 const egressPolicyName = "default"
 
-func checkPolicyName(p *ateapi.EgressPolicy) error {
+// checkPolicy applies the validation real Substrate does on egress
+// policies: the name, and no two rules covering the same hostname pattern
+// on the same port, whatever their protocols. An all-ports rule overlaps
+// every port.
+func checkPolicy(p *ateapi.EgressPolicy) error {
 	if n := p.GetMetadata().GetName(); n != "" && n != egressPolicyName {
 		return status.Error(codes.InvalidArgument, "egress_policy.metadata.name: must be default")
+	}
+	type use struct {
+		rule int
+		all  bool
+		port int32
+	}
+	seen := map[string][]use{}
+	for i, r := range p.GetRules() {
+		var hosts []string
+		var ports *ateapi.Ports
+		switch {
+		case r.GetHttp() != nil:
+			hosts, ports = r.GetHttp().GetHostnames(), r.GetHttp().GetPorts()
+		case r.GetHttps() != nil:
+			hosts, ports = r.GetHttps().GetHostnames(), r.GetHttps().GetPorts()
+		case r.GetTlsPassthrough() != nil:
+			hosts, ports = r.GetTlsPassthrough().GetHostnames(), r.GetTlsPassthrough().GetPorts()
+		}
+		var uses []use
+		if ports.GetAll() != nil {
+			uses = []use{{rule: i, all: true}}
+		}
+		for _, n := range ports.GetNumbers() {
+			uses = append(uses, use{rule: i, port: n})
+		}
+		for _, h := range hosts {
+			for _, u := range uses {
+				for _, prev := range seen[h] {
+					if prev.rule != u.rule && (prev.all || u.all || prev.port == u.port) {
+						return status.Errorf(codes.InvalidArgument,
+							"egress_policy.rules[%d]: hostname %q overlaps rules[%d] on the same port", u.rule, h, prev.rule)
+					}
+				}
+			}
+			seen[h] = append(seen[h], uses...)
+		}
 	}
 	return nil
 }
@@ -545,7 +585,7 @@ func (s *controlServer) CreateActorEgressPolicy(_ context.Context, in *ateapi.Cr
 		return nil, status.Errorf(codes.AlreadyExists, "actor %s already has an egress policy", k)
 	}
 	p := clone(in.GetEgressPolicy())
-	if err := checkPolicyName(p); err != nil {
+	if err := checkPolicy(p); err != nil {
 		return nil, err
 	}
 	p.Metadata = w.meta(&ateapi.ResourceMetadata{Atespace: in.GetActor().GetAtespace(), Name: egressPolicyName}, w.clock.Now())
@@ -563,7 +603,7 @@ func (s *controlServer) UpdateActorEgressPolicy(_ context.Context, in *ateapi.Up
 		return nil, notFound("egress policy for actor", k)
 	}
 	p := clone(in.GetEgressPolicy())
-	if err := checkPolicyName(p); err != nil {
+	if err := checkPolicy(p); err != nil {
 		return nil, err
 	}
 	p.Metadata = old.Metadata

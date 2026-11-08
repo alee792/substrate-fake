@@ -22,4 +22,6 @@ Where Substrate v1.0.0's API documentation doesn't say what happens, the fake pi
 Against Substrate v1.0.0 on KinD (2026-11-08):
 
 - **An egress policy must be named `default`.** Any other `metadata.name` is InvalidArgument (`egress_policy.metadata.name: must be default`). The fake also accepts an empty name and stores it as `default`; whether the real API does is unchecked.
+- **Two egress rules can't cover the same hostname pattern on the same port**, whatever their protocols. An all-ports rule overlaps every port, so one `*` all-ports rule for HTTP and another for TLS is rejected. The fake enforces this with its own InvalidArgument message; the real message is unchecked.
+- **A malformed `ate-secret://k8s.io/...` credential URI is accepted** when the policy is written, and only fails at request time, as a 503 from the egress gateway. The fake has no gateway, so it neither checks nor fails these.
 - **A WorkerPool creates a Deployment with its own name**, so a pool can't share a name with another Deployment in its namespace. The fake has no Deployments and doesn't enforce this.
