@@ -68,7 +68,8 @@ type Profile struct {
 	// ResumeP95 is the 95th percentile resume latency.
 	ResumeP95 func(t time.Time) time.Duration
 	// ResumeFailureRatio is the share of resumes that fail with
-	// ResourceExhausted, 0 to 1.
+	// ResourceExhausted, 0 to 1. Failed resumes are fast and share the
+	// latency histogram, so a high ratio drags an unfiltered p95 down.
 	ResumeFailureRatio func(t time.Time) float64
 }
 
@@ -165,7 +166,7 @@ func NewWorld(clock Clock) *World {
 // Now is the world's current time.
 func (w *World) Now() time.Time { return w.clock.Now() }
 
-func key(atespace, name string) string { return atespace + "/" + name }
+func key(atespace, name string) string  { return atespace + "/" + name }
 func refKey(r *ateapi.ObjectRef) string { return key(r.GetAtespace(), r.GetName()) }
 func ts(t time.Time) *timestamppb.Timestamp {
 	if t.IsZero() {

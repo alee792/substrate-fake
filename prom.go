@@ -51,15 +51,21 @@ var nameSets = map[MetricNames]names{
 	},
 }
 
-// Histogram bucket bounds in seconds, fine enough that histogram_quantile
-// lands near a profile's p95.
-var buckets = []float64{0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.25, 1.5, 2, 3, 5, 10, math.Inf(1)}
+// Histogram bucket bounds in seconds. Substrate's own bounds are coarser
+// (0.005 0.01 0.025 0.05 0.075 0.1 0.15 0.25 0.5 1 2.5 5 10 30); these are
+// finer so that histogram_quantile lands near a profile's p95.
+var buckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.25, 1.5, 2, 3, 5, 10, math.Inf(1)}
 
 // scrapeInterval is the spacing of generated samples.
 const scrapeInterval = 30 * time.Second
 
 // Latency is lognormal; sigma sets its spread.
 const sigma = 0.3
+
+// failedMedian is the median latency of a failed resume. On a real cluster a
+// ResourceExhausted resume is rejected in a few milliseconds, and it lands in
+// the same histogram as successful resumes, tagged with error.type.
+const failedMedian = 2.5e-3
 
 // promDB generates series from the world on demand, so any time range can be
 // queried without storing samples.
@@ -147,6 +153,10 @@ func (db *promDB) series() []seriesDef {
 				lbl = append(lbl, n.errTy, "ResourceExhausted")
 			}
 			count := func(at time.Time, dt time.Duration) float64 { return rate(at) * share(at) * dt.Seconds() }
+			median := median
+			if failed {
+				median = func(time.Time) float64 { return failedMedian }
+			}
 			for _, le := range buckets {
 				le := le
 				out = append(out, seriesDef{
