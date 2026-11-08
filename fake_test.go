@@ -75,6 +75,13 @@ func TestLifecycle(t *testing.T) {
 	if _, err := api.CreateActorEgressPolicy(ctx, &ateapi.CreateActorEgressPolicyRequest{Actor: ref("s1", "a1"), EgressPolicy: &ateapi.EgressPolicy{}}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := api.UpdateActorEgressPolicy(ctx, &ateapi.UpdateActorEgressPolicyRequest{Actor: ref("s1", "a1"),
+		EgressPolicy: &ateapi.EgressPolicy{Metadata: &ateapi.ResourceMetadata{Name: "custom"}}}); code(err) != codes.InvalidArgument {
+		t.Fatalf("egress policy named other than default: %v", err)
+	}
+	if p := c.World.Policy("s1", "a1"); p.GetMetadata().GetName() != "default" {
+		t.Fatalf("egress policy name = %q", p.GetMetadata().GetName())
+	}
 	r, err := api.ResumeActor(ctx, &ateapi.ResumeActorRequest{Actor: ref("s1", "a1")})
 	if err != nil || !r.Resumed || r.Actor.Status.State != ateapi.ActorState_ACTOR_STATE_RUNNING {
 		t.Fatalf("resume: %v %v", r, err)
@@ -100,7 +107,7 @@ func TestLifecycle(t *testing.T) {
 	}
 
 	want := []string{"CreateAtespace s1", "CreateActorTemplate s1/t1", "GetActorTemplate s1/t1", "GetActorTemplate s1/t1", "CreateActor s1/a1",
-		"CreateActorEgressPolicy s1/a1", "ResumeActor s1/a1", "SuspendActor s1/a1", "DeleteActor s1/a1", "DeleteActor s1/a1"}
+		"CreateActorEgressPolicy s1/a1", "UpdateActorEgressPolicy s1/a1", "ResumeActor s1/a1", "SuspendActor s1/a1", "DeleteActor s1/a1", "DeleteActor s1/a1"}
 	if got := c.World.CallNames(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}

@@ -511,6 +511,17 @@ func (s *controlServer) DeleteActor(_ context.Context, in *ateapi.DeleteActorReq
 
 // ---------- egress policies ----------
 
+// egressPolicyName is the only name an actor's egress policy may have;
+// Substrate v1.0.0 rejects others with "must be default".
+const egressPolicyName = "default"
+
+func checkPolicyName(p *ateapi.EgressPolicy) error {
+	if n := p.GetMetadata().GetName(); n != "" && n != egressPolicyName {
+		return status.Error(codes.InvalidArgument, "egress_policy.metadata.name: must be default")
+	}
+	return nil
+}
+
 func (s *controlServer) GetActorEgressPolicy(_ context.Context, in *ateapi.GetActorEgressPolicyRequest) (*ateapi.EgressPolicy, error) {
 	w := s.w
 	w.mu.Lock()
@@ -534,7 +545,10 @@ func (s *controlServer) CreateActorEgressPolicy(_ context.Context, in *ateapi.Cr
 		return nil, status.Errorf(codes.AlreadyExists, "actor %s already has an egress policy", k)
 	}
 	p := clone(in.GetEgressPolicy())
-	p.Metadata = w.meta(&ateapi.ResourceMetadata{Atespace: in.GetActor().GetAtespace(), Name: in.GetActor().GetName()}, w.clock.Now())
+	if err := checkPolicyName(p); err != nil {
+		return nil, err
+	}
+	p.Metadata = w.meta(&ateapi.ResourceMetadata{Atespace: in.GetActor().GetAtespace(), Name: egressPolicyName}, w.clock.Now())
 	w.policies[k] = p
 	return clone(p), nil
 }
@@ -549,6 +563,9 @@ func (s *controlServer) UpdateActorEgressPolicy(_ context.Context, in *ateapi.Up
 		return nil, notFound("egress policy for actor", k)
 	}
 	p := clone(in.GetEgressPolicy())
+	if err := checkPolicyName(p); err != nil {
+		return nil, err
+	}
 	p.Metadata = old.Metadata
 	touch(p.Metadata, w.clock.Now())
 	w.policies[k] = p
