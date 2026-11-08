@@ -68,7 +68,8 @@ type Profile struct {
 	// ResumeP95 is the 95th percentile resume latency.
 	ResumeP95 func(t time.Time) time.Duration
 	// ResumeFailureRatio is the share of resumes that fail with
-	// ResourceExhausted, 0 to 1.
+	// ResourceExhausted, 0 to 1. Failed resumes are fast and share the
+	// latency histogram, so a high ratio drags an unfiltered p95 down.
 	ResumeFailureRatio func(t time.Time) float64
 }
 

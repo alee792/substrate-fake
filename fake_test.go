@@ -391,6 +391,44 @@ func TestPrometheus(t *testing.T) {
 	}
 }
 
+// Failed resumes share the latency histogram with successful ones, as on a
+// real cluster, so a p95 that doesn't filter error.type is dragged down by
+// fast rejections when a pool is full.
+func TestFailedResumesAreFast(t *testing.T) {
+	c := start(t, Options{Names: UnderscoreNames, Scenario: func(w *World) {
+		Basic(w)
+		w.AddTemplate(TemplateSpec{Atespace: "a", Name: "full", Image: "img", Selector: map[string]string{"pool": "default"}, Created: time.Now().Add(-2 * time.Hour)}.Proto())
+		w.SetProfile("a", "full", Profile{
+			ResumesPerSecond:   func(time.Time) float64 { return 1 },
+			ResumeP95:          func(time.Time) time.Duration { return 400 * time.Millisecond },
+			ResumeFailureRatio: func(time.Time) float64 { return 0.8 },
+		})
+	}})
+	p95 := func(filter string) float64 {
+		t.Helper()
+		q := `1000 * histogram_quantile(0.95, sum by (le) (rate(ate_actor_lifecycle_operation_duration_seconds_bucket{ate_actor_operation_name="resume"` + filter + `}[5m])))`
+		res := promQuery(t, c.PrometheusURL, "/api/v1/query", url.Values{"query": {q}})
+		if len(res) != 1 {
+			t.Fatalf("%s: %d series, want 1", q, len(res))
+		}
+		v, _ := strconv.ParseFloat(res[0].(map[string]any)["value"].([]any)[1].(string), 64)
+		return v
+	}
+	if all := p95(""); all < 100 || all > 360 {
+		// With 80% failing in ~2.5 ms, p95 is the 75th percentile of the
+		// successful resumes: well under 400 ms but far from the failures.
+		t.Errorf("unfiltered p95 = %.0f ms, want between 100 and 360", all)
+	}
+	if ok := p95(`, error_type=""`); ok < 340 || ok > 460 {
+		t.Errorf("successful p95 = %.0f ms, want about 400", ok)
+	}
+	fails := `sum(rate(ate_actor_lifecycle_operation_duration_seconds_bucket{ate_actor_operation_name="resume", error_type="ResourceExhausted", le="0.01"}[5m])) / sum(rate(ate_actor_lifecycle_operation_duration_seconds_count{ate_actor_operation_name="resume", error_type="ResourceExhausted"}[5m]))`
+	res := promQuery(t, c.PrometheusURL, "/api/v1/query", url.Values{"query": {fails}})
+	if v, _ := strconv.ParseFloat(res[0].(map[string]any)["value"].([]any)[1].(string), 64); v < 0.9 {
+		t.Errorf("share of failed resumes under 10 ms = %.2f, want nearly all", v)
+	}
+}
+
 // update_time moves on any write, so the assignment says when an actor
 // arrived on its worker.
 func TestAssignmentMarksArrival(t *testing.T) {
