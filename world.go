@@ -165,7 +165,7 @@ func NewWorld(clock Clock) *World {
 // Now is the world's current time.
 func (w *World) Now() time.Time { return w.clock.Now() }
 
-func key(atespace, name string) string { return atespace + "/" + name }
+func key(atespace, name string) string  { return atespace + "/" + name }
 func refKey(r *ateapi.ObjectRef) string { return key(r.GetAtespace(), r.GetName()) }
 func ts(t time.Time) *timestamppb.Timestamp {
 	if t.IsZero() {

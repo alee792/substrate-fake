@@ -17,11 +17,11 @@ import (
 
 	ateapi "go.ate.dev/substrate/api/ateapi/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
-	"google.golang.org/grpc/codes"
 )
 
 // Options configures Start.

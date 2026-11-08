@@ -16,3 +16,12 @@ Where Substrate v1.0.0's API documentation doesn't say what happens, the fake pi
 12. **Metric names and labels**: `ate.actor.lifecycle.operation.duration` (seconds, with `ate.actor.operation.name`, `ate.template.name`, `ate.template.atespace`, `ate.workerpool.name`, `error.type`) and `ate.actor.crashes`. Underscore names add `_seconds` and `_total`.
 13. **Worker names are `<pool>-<n>`**, and the worker pod has the same name.
 14. **Pod logs are per actor.** A worker pod's log shows whatever actor is assigned to it now.
+
+## Checked on a real cluster
+
+Against Substrate v1.0.0 on KinD (2026-11-08):
+
+- **An egress policy must be named `default`.** Any other `metadata.name` is InvalidArgument (`egress_policy.metadata.name: must be default`). The fake also accepts an empty name and stores it as `default`; whether the real API does is unchecked.
+- **Two egress rules can't tie on a hostname pattern and a port**, whatever their protocols. Checked in the v1.0.0 source (`apivalidation/egress_policy.go`) as well as on kind, and the fake now copies it: http and https rules without ports default to 80 and 443 first, patterns compare as strings (so `*` and `api.example.com` on one port don't tie), and an all-ports rule ties only with another all-ports rule. One `*` all-ports rule for HTTP and another for TLS is rejected; `*` on all ports plus TLS on 443 is not. A tls_passthrough rule must name its ports.
+- **A malformed `ate-secret://k8s.io/...` credential URI is accepted** when the policy is written, and only fails at request time, as a 503 from the egress gateway. The fake has no gateway, so it neither checks nor fails these.
+- **A WorkerPool creates a Deployment with its own name**, so a pool can't share a name with another Deployment in its namespace. The fake has no Deployments and doesn't enforce this.
